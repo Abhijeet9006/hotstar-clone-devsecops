@@ -1,0 +1,170 @@
+pipeline {
+    agent any
+
+    environment {
+        SCANNER_HOME = tool 'SonarScanner'
+    }
+
+    stages {
+
+        stage('Check Tools') {
+            steps {
+                sh '''
+                git --version
+                node -v
+                npm -v
+                docker version
+                trivy --version
+                '''
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/Abhijeet9006/hotstar-clone-devsecops.git'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm install'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Build React App') {
+            steps {
+                sh 'CI=false npm run build'
+            }
+        }
+
+        stage('Verify Build') {
+            steps {
+                sh '''
+                ls -la build
+                '''
+            }
+        }
+        
+        stage('Docker Build') {
+            steps {
+                sh '''
+                docker build -t hotstar-clone:${BUILD_NUMBER} .
+                docker tag hotstar-clone:${BUILD_NUMBER} hotstar-clone:latest
+                docker images | grep hotstar-clone
+                '''
+            }
+        }
+        
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                trivy image --severity HIGH,CRITICAL hotstar-clone:${BUILD_NUMBER}
+                '''
+            }
+        }
+        
+        stage('Push Image to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKERHUB_USER',
+                    passwordVariable: 'DOCKERHUB_PASS'
+                )]) {
+                    sh '''
+                    echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+        
+                    docker tag hotstar-clone:${BUILD_NUMBER} abhi9006/hotstar-clone-devsecops:${BUILD_NUMBER}
+                    docker tag hotstar-clone:${BUILD_NUMBER} abhi9006/hotstar-clone-devsecops:latest
+        
+                    docker push abhi9006/hotstar-clone-devsecops:${BUILD_NUMBER}
+                    docker push abhi9006/hotstar-clone-devsecops:latest
+                    '''
+                }
+            }
+        }
+        
+        stage('Terraform Init') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform init -input=false -reconfigure'
+                }
+            }
+        }
+        
+        stage('Terraform Validate') {
+            steps {
+                dir('terraform') {
+                    sh '''
+                    terraform fmt -check -recursive
+                    terraform validate
+                    '''
+                }
+            }
+        }
+        
+        stage('Terraform Apply') {
+             steps {
+                dir('terraform') {
+                    sh 'terraform apply -auto-approve -input=false'
+                }
+            }
+        }
+        
+        stage('Update Kubeconfig') {
+            steps {
+                sh '''
+                aws eks update-kubeconfig \
+                  --region ap-south-1 \
+                  --name hotstar-eks-cluster
+                '''
+            }
+        }
+        
+        stage('Deploy to EKS') {
+            steps {
+                sh '''
+                kubectl apply -f kubernetes/
+                kubectl rollout status deployment/hotstar-clone
+                kubectl get pods
+                kubectl get svc
+                '''
+            }
+        }
+        
+        stage('OWASP ZAP Scan') {
+            steps {
+                sh '''
+                mkdir -p reports/zap
+
+                docker run --rm \
+                  --dns 8.8.8.8 \
+                  --dns 1.1.1.1 \
+                  -v $(pwd)/reports/zap:/zap/wrk/:rw \
+                  zaproxy/zap-stable \
+                  zap-baseline.py \
+                  -t http://a4b808892b05049d5b64c4af6c95f300-1875188271.ap-south-1.elb.amazonaws.com \
+                  -r zap-report.html \
+                  -m 2 || true
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/zap/zap-report.html', allowEmptyArchive: true
+        }
+    }
+    
+}
