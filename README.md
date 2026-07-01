@@ -31,6 +31,8 @@ This repository extends the application with Dockerization, CI/CD automation, se
 - SonarQube SAST scan
 - Trivy container scan
 - Jenkins installation and configuration
+- Git Push
+- Pipeline Script in Jenkins
 
 ## Upcoming
 
